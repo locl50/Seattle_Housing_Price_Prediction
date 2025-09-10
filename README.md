@@ -1,1 +1,0 @@
-# Seattle Housing Price Prediction
