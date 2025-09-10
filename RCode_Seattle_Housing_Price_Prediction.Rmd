@@ -1,0 +1,570 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(corrplot)
+library(ggplot2)
+library(tidyverse)
+library(car)
+library(boot)
+library(glmnet)
+library(caret)
+library(randomForest)
+```
+
+# Dataset & Cleaning
+```{r}
+# Read in dataset
+seattle_housing <- read.csv("house_sales.csv")
+
+# Check for NA's
+na_count <- sum(is.na(seattle_housing))
+print(paste("Number of missing variables:", na_count))
+
+# Create house_age variable
+date <- as.numeric(format(Sys.Date(), "%Y"))  # Get current year
+seattle_housing$house_age <- date - seattle_housing$yr_built
+
+# Create "renovated" variable
+seattle_housing$renovated <- ifelse(seattle_housing$yr_renovated == 0, 0, 1)
+```
+
+```{r}
+# Remove unneccesary variables by creating data subset
+seattle_clean <- seattle_housing %>%
+  select(price, bedrooms, bathrooms, sqft_living, sqft_lot, floors, waterfront, view, condition, grade, house_age, renovated)
+
+# Data type conversions
+seattle_clean$waterfront <- as.factor(seattle_clean$waterfront)
+
+seattle_clean$view <- as.factor(seattle_clean$view)
+
+seattle_clean$condition <- as.factor(seattle_clean$condition)
+
+seattle_clean$grade <- as.factor(seattle_clean$grade)
+
+seattle_clean$renovated <- as.factor(seattle_clean$renovated)
+```
+
+```{r}
+# Remove outlier house with 33 bedrooms
+
+seattle_clean <- seattle_clean[-15871, ]
+```
+
+```{r}
+glimpse(seattle_clean)
+```
+
+## Distribution of House Prices
+
+```{r}
+ggplot(seattle_clean, aes(x = price)) +
+  geom_histogram(binwidth = 250000) +
+  labs(title = "Histogram of House Prices",
+       x = "Price",
+       y = "Frequency") +
+  theme_minimal() +
+  scale_x_continuous(labels = scales::comma) + scale_y_continuous(labels = scales::comma) 
+```
+
+```{r}
+ggplot(seattle_clean, aes(sample = price)) +
+stat_qq() +
+stat_qq_line() +
+labs(title = "QQ Plot of House Prices",
+x = "Theoretical Quantiles",
+y = "Sample Quantiles") +
+theme_minimal()
+```
+
+```{r}
+ggplot(seattle_clean, aes(x = bedrooms)) +
+  geom_histogram(binwidth = 1) +
+  labs(title = "Histogram of Bedrooms",
+       x = "Bedrooms",
+       y = "Frequency") +
+  theme_minimal() +
+  scale_x_continuous(labels = scales::comma) + scale_y_continuous(labels = scales::comma) 
+```
+
+```{r}
+ggplot(seattle_clean, aes(x = bathrooms)) +
+  geom_histogram(binwidth = 1) +
+  labs(title = "Histogram of Bathrooms",
+       x = "Bathrooms",
+       y = "Frequency") +
+  theme_minimal() +
+  scale_x_continuous(labels = scales::comma) + scale_y_continuous(labels = scales::comma) 
+```
+
+```{r}
+ggplot(seattle_clean, aes(x = sqft_living)) +
+  geom_histogram() +
+  labs(title = "Histogram of Sqft_living",
+       x = "Sqft_living",
+       y = "Frequency") +
+  theme_minimal() +
+  scale_x_continuous(labels = scales::comma) + scale_y_continuous(labels = scales::comma) 
+```
+
+```{r}
+ggplot(seattle_clean, aes(sample = sqft_living)) +
+stat_qq() +
+stat_qq_line() +
+labs(title = "QQ Plot of Sqft_living",
+x = "Theoretical Quantiles",
+y = "Sample Quantiles") +
+theme_minimal()
+```
+
+```{r}
+seattle_quant <- seattle_clean %>%
+  select(price, bedrooms, bathrooms, sqft_living, sqft_lot, floors, house_age)
+```
+
+```{r}
+seattle.cor <- cor(seattle_quant)
+
+corrplot(seattle.cor, order = "original", method = "number", col = colorRampPalette(c("white","lightblue","red"))(100))
+```
+
+```{r}
+boxplot(seattle_clean$price ~ seattle_clean$waterfront, ylab = "Price", xlab = "Waterfront")
+
+boxplot(seattle_clean$price ~ seattle_clean$view, ylab = "Price", xlab = "View")
+
+boxplot(seattle_clean$price ~ seattle_clean$condition, ylab = "Price", xlab = "Condition")
+
+boxplot(seattle_clean$price ~ seattle_clean$grade, ylab = "Price", xlab = "Grade")
+```
+
+# Initial OLS Model
+
+Specification: Predictors Selected w/ Business Knowledge
+
+```{r}
+ols.initial <- lm(price ~ ., data = seattle_clean)
+
+summary(ols.initial)
+```
+
+## Assumption 2: Errors are normally distributed (EN)
+
+```{r}
+plot(ols.initial, which = 2)
+```
+
+```{r}
+hist(ols.initial$residuals)
+```
+
+## Assumption 3: predictors are independent (XI)
+
+```{r}
+library(olsrr)
+
+ci <- ols_eigen_cindex(ols.initial)
+
+ci[, 1:2]
+
+ci[nrow(ci), 1:2]
+```
+
+```{r}
+ols_vif_tol(ols.initial)
+```
+
+```{r}
+vif(ols.initial)
+```
+
+## Assumption 4: the outcome variable is linearly related to the predictors (LI)
+
+```{r}
+bed.fit <- lm(price ~ bedrooms, data = seattle_clean)
+
+plot(seattle_clean$bedrooms, seattle_clean$price,
+     xlab = "Bedrooms",
+     ylab = "Price",
+     cex = .5,
+     col = "darkgrey")
+abline(bed.fit)
+lines(lowess(seattle_clean$bedrooms, seattle_clean$price),
+      col = "red")
+```
+
+```{r}
+bath.fit <- lm(price ~ bathrooms, data = seattle_clean)
+
+plot(seattle_clean$bathrooms, seattle_clean$price,
+     xlab = "Bathrooms",
+     ylab = "Price",
+     cex = .5,
+     col = "darkgrey")
+abline(bath.fit)
+lines(lowess(seattle_clean$bathrooms, seattle_clean$price),
+      col = "red")
+```
+
+```{r}
+living.fit <- lm(price ~ sqft_living, data = seattle_clean)
+
+plot(seattle_clean$sqft_living, seattle_clean$price,
+     xlab = "Sqft_living",
+     ylab = "Price",
+     cex = .5,
+     col = "darkgrey")
+abline(living.fit)
+lines(lowess(seattle_clean$sqft_living, seattle_clean$price),
+      col = "red")
+```
+
+```{r}
+lot.fit <- lm(price ~ sqft_lot, data = seattle_clean)
+
+plot(seattle_clean$sqft_lot, seattle_clean$price,
+     xlab = "Sqft_lot",
+     ylab = "Price",
+     cex = .5,
+     col = "darkgrey")
+abline(lot.fit)
+lines(lowess(seattle_clean$sqft_lot, seattle_clean$price),
+      col = "red")
+```
+
+```{r}
+floors.fit <- lm(price ~ floors, data = seattle_clean)
+
+plot(seattle_clean$floors, seattle_clean$price,
+     xlab = "Floors",
+     ylab = "Price",
+     cex = .5,
+     col = "darkgrey")
+abline(floors.fit)
+lines(lowess(seattle_clean$floors, seattle_clean$price),
+      col = "red")
+```
+
+```{r}
+age.fit <- lm(price ~ house_age, data = seattle_clean)
+
+plot(seattle_clean$house_age, seattle_clean$price,
+     xlab = "House_age",
+     ylab = "Price",
+     cex = .5,
+     col = "darkgrey")
+abline(age.fit)
+lines(lowess(seattle_clean$house_age, seattle_clean$price),
+      col = "red")
+```
+
+## Assumption 8: constant error variance (EV)
+
+```{r}
+plot(ols.initial, which = 1)
+```
+
+```{r}
+plot(ols.initial$residuals ~ ols.initial$fitted.values, 
+     main = "Mostly Homoskedastic Residuals",
+     xlab = "Predicted Values", 
+     ylab = "Residuals")
+abline(h = 0, col = "red")
+```
+
+# Model 1 (ols.full)
+
+```{r}
+ols.full <-  lm(log(price) ~ ., data = seattle_clean)
+
+summary(ols.full)
+```
+
+## ols.full 10FCV MSE
+
+```{r}
+set.seed(1)
+
+train_control <- trainControl(method = "cv", number = 10)
+
+ols.full.10f <- train(log(price) ~ ., data = seattle_clean, method = "lm", trControl = train_control)
+
+cbind("MSE" = ols.full.10f$results$RMSE^2)
+```
+
+## Assumption 2: Errors are normally distributed (EN)
+
+```{r}
+plot(ols.full, which = 2)
+```
+
+## Assumption 8: constant error variance (EV)
+
+```{r}
+plot(ols.full, which = 1)
+```
+
+## Stepwise
+
+```{r}
+ols.null <- lm(price ~ 1, data = seattle_clean)
+
+kval <- qchisq(0.05, 1, lower.tail = F)
+kval
+
+fit.step.05p <- step(ols.full, scope = list(lower = ols.null, upper = ols.full), direction = "both", test = "F", k = kval)
+
+summary(fit.step.05p)
+```
+
+Stepwise removed "sqft_lot" and "renovated" variable
+
+# Model 2 (ols.small)
+
+```{r}
+ols.small <- lm(log(price) ~ bedrooms + bathrooms + sqft_living + 
+    floors + waterfront + view + condition + grade + house_age, 
+    data = seattle_clean)
+
+summary(ols.small)
+```
+
+## Assumption 2: Errors are normally distributed (EN)
+
+```{r}
+plot(ols.small, which = 2)
+```
+
+## Assumption 8: constant error variance (EV)
+
+```{r}
+plot(ols.small, which = 1)
+```
+
+## ols.small 10FCV MSE
+
+```{r}
+set.seed(1)
+
+train_control <- trainControl(method = "cv", number = 10)
+
+ols.small.10f <- train(log(price) ~ bedrooms + bathrooms + sqft_living + 
+    floors + waterfront + view + condition + grade + house_age, data = seattle_clean, method = "lm", trControl = train_control)
+
+cbind("MSE" = ols.small.10f$results$RMSE^2)
+```
+
+# Model 3 (WLS.full)
+
+```{r}
+wts.full <- 1 / lm(abs(ols.full$residuals) ~ ols.full$fitted.values)$fitted.values^2
+```
+
+```{r}
+wls.full <- lm(log(price) ~ ., data = seattle_clean, weights = wts.full)
+
+summary(wls.full)
+```
+
+## Assumption 2: Errors are normally distributed (EN)
+
+```{r}
+plot(wls.full, which = 2)
+```
+
+## Assumption 8: constant error variance (EV)
+
+```{r}
+plot(wls.full, which = 1)
+```
+
+## wls.full 10FCV MSE
+
+```{r}
+set.seed(1)
+
+train_control <- trainControl(method = "cv", number = 10)
+
+wls.full.10f <- train(log(price) ~ ., data = seattle_clean, method = "lm", trControl = train_control, weights = wts.full)
+
+print(wls.full.10f$results$RMSE^2)
+```
+
+# Model 4 (WLS.small)
+
+```{r}
+wts.small <- 1 / lm(abs(ols.small$residuals) ~ ols.small$fitted.values)$fitted.values^2
+```
+
+```{r}
+wls.small <- lm(log(price) ~ bedrooms + bathrooms + sqft_living + 
+    floors + waterfront + view + condition + grade + house_age, data = seattle_clean, weights = wts.small)
+
+summary(wls.small)
+```
+
+## Assumption 2: Errors are normally distributed (EN)
+
+```{r}
+plot(wls.small, which = 2)
+```
+
+## Assumption 8: constant error variance (EV)
+
+```{r}
+plot(wls.small, which = 1)
+```
+
+## wls.small 10FCV MSE
+
+```{r}
+set.seed(1)
+
+train_control <- trainControl(method = "cv", number = 10)
+
+wls.small.10f <- train(log(price) ~ bedrooms + bathrooms + sqft_living + 
+    floors + waterfront + view + condition + grade + house_age, data = seattle_clean, method = "lm", trControl = train_control, weights = wts.small)
+
+print(wls.small.10f$results$RMSE^2)
+```
+
+# Model 5 (LASSO.full)
+
+```{r}
+set.seed(1)
+
+x1 <- model.matrix(log(price) ~ ., data = seattle_clean)[, -1]
+
+y1 <- log(seattle_clean$price)
+
+lasso.full <- cv.glmnet(x1, y1, alpha = 1)
+
+lasso.full.best.lambda <- lasso.full$lambda.min
+
+min.cv.lasso.full <- min(lasso.full$cvm)
+
+cbind("Best Lambda" = lasso.full.best.lambda, "Best 10FCV MSE" = min.cv.lasso.full)
+```
+
+# Model 6 (LASSO.full.wts)
+
+```{r}
+set.seed(1)
+
+x1wts <- model.matrix(log(price) ~ ., weights = wts.full, data = seattle_clean)[, -1]
+
+y1wts <- log(seattle_clean$price)
+
+lasso.full.wts <- cv.glmnet(x1wts, y1wts, weights = wts.full, alpha = 1)
+
+lasso.full.wts.best.lambda <- lasso.full.wts$lambda.min
+
+min.cv.lasso.full.wts <- min(lasso.full.wts$cvm)
+
+cbind("Best Lambda" = lasso.full.wts.best.lambda, "Best 10FCV MSE" = min.cv.lasso.full.wts)
+```
+
+# Model 7 (LASSO.small)
+
+```{r}
+set.seed(1)
+
+x2 <- model.matrix(log(price) ~ bedrooms + bathrooms + sqft_living + 
+    floors + waterfront + view + condition + grade + house_age, data = seattle_clean)[, -1]
+
+y2 <- log(seattle_clean$price)
+
+lasso.small <- cv.glmnet(x2, y2, alpha = 1)
+
+lasso.small.best.lambda <- lasso.small$lambda.min
+
+min.cv.lasso.small <- min(lasso.small$cvm)
+
+cbind("Best Lambda" = lasso.small.best.lambda, "Best 10FCV MSE" = min.cv.lasso.small)
+```
+
+# model 8 (LASSO.small.wts)
+
+```{r}
+set.seed(1)
+
+x2wts <- model.matrix(log(price) ~ bedrooms + bathrooms + sqft_living + 
+    floors + waterfront + view + condition + grade + house_age, weights = wts.small, data = seattle_clean)[, -1]
+
+y2wts <- log(seattle_clean$price)
+
+lasso.small.wts <- cv.glmnet(x2wts, y2wts, weights = wts.small, alpha = 1)
+
+lasso.small.wts.best.lambda <- lasso.small.wts$lambda.min
+
+min.cv.lasso.small.wts <- min(lasso.small.wts$cvm)
+
+cbind("Best Lambda" = lasso.small.wts.best.lambda, "Best 10FCV MSE" = min.cv.lasso.small.wts)
+```
+
+# Model 9 (RF.full)
+
+```{r}
+set.seed(1)
+
+rf.full <- randomForest(log(price) ~ ., data = seattle_clean, mtry = 4, importance = T)
+
+rf.full
+```
+
+```{r}
+cbind("RF.full MSE" = mean(rf.full$mse))
+```
+
+```{r}
+varImpPlot(rf.full, type = 1)
+
+importance(rf.full, type = 1)
+```
+
+# Model 10 (RF.small)
+
+```{r}
+set.seed(1)
+
+rf.small <- randomForest(log(price) ~ bedrooms + bathrooms + sqft_living + 
+    floors + waterfront + view + condition + grade + house_age, data = seattle_clean, mtry = 3, importance = T)
+
+rf.small
+```
+
+```{r}
+cbind("RF.small MSE" = mean(rf.small$mse))
+```
+
+```{r}
+varImpPlot(rf.small, type = 1)
+
+importance(rf.small, type = 1)
+```
+
+# Final MSE Results
+
+```{r}
+cbind("OLS.full MSE" = ols.full.10f$results$RMSE^2, "OLS.small MSE" = ols.small.10f$results$RMSE^2, "WLS.full MSE" = wls.full.10f$results$RMSE^2, "WLS.small MSE" = wls.small.10f$results$RMSE^2, "LASSO.full MSE" = min.cv.lasso.full, "LASSO.full.wts MSE" = min.cv.lasso.full.wts, "LASSO.small MSE" = min.cv.lasso.small, "LASSO.small.wts MSE" = min.cv.lasso.small.wts, "RF.full MSE" = mean(rf.full$mse), "RF.small MSE" = mean(rf.small$mse))
+```
+
+```{r}
+results <- data.frame(
+  Method = c("OLS.full", "OLS.small", "WLS.full", "WLS.small", "LASSO.full", "LASSO.full.wts", "LASSO.small", "LASSO.small.wts", "RF.full", "RF.small"),
+  MSE = c(ols.full.10f$results$RMSE^2, ols.small.10f$results$RMSE^2, wls.full.10f$results$RMSE^2, wls.small.10f$results$RMSE^2, min.cv.lasso.full, min.cv.lasso.full.wts, min.cv.lasso.small, min.cv.lasso.small.wts, mean(rf.full$mse), mean(rf.small$mse))
+)
+
+results$RMSE <- sqrt(results$MSE)
+
+results
+```
